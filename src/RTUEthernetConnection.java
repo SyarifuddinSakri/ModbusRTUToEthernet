@@ -54,10 +54,15 @@ abstract class Request{
 
 class Response{
      byte[] data;
-     byte[] exractedData;
+     byte[] extractedData;
     public Response(byte[] data) {
         this.data = data;
-        this.exractedData = extractData(this.data);
+        try {
+			this.extractedData = extractData(this.data);
+		} catch (ModbusException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
     }
     public static int extractSlaveAddress(byte[] response) {
         return response[0] & 0xFF; // Extract and return the slave address from the response frame
@@ -67,12 +72,34 @@ class Response{
         return response[1] & 0xFF; // Extract and return the function code from the response frame
     }
 
-    public static byte[] extractData(byte[] response) {
+    public static byte[] extractData(byte[] response) throws ModbusException {
         // Extract and return the data portion of the response frame
         int dataLength = response.length - 5; // Calculate the length of the data portion (excluding address, function code, byte counts and CRC)
         byte[] data = new byte[dataLength];
         System.arraycopy(response, 3, data, 0, dataLength);
-        return data;
+        if (data.length>1) {
+        	return data;
+        }else {
+        	if(data[0]==(byte)0x01) {
+        		throw new ModbusException("Illegal Function : Exception code "+byteToHexString(data[0]));
+        	}else if(data[0]==(byte)0x02) {
+        		throw new ModbusException("Illegal Data Address : Exception code "+byteToHexString(data[0]));
+        	}else if(data[0]==(byte)0x03) {
+        		throw new ModbusException("Illegal Data Value : Exception code "+byteToHexString(data[0]));
+        	}else if(data[0]==(byte)0x04) {
+        		throw new ModbusException("Slave Device Failure : Exception code "+byteToHexString(data[0]));
+        	}else if(data[0]==(byte)0x05) {
+        		throw new ModbusException("Acknowleging and taking more time to process : Exception code "+byteToHexString(data[0]));
+        	}else if(data[0]==(byte)0x06) {
+        		throw new ModbusException("Slave Device Busy : Exception code "+byteToHexString(data[0]));
+        	}else if(data[0]==(byte)0x0A){
+        		throw new ModbusException("Gateway Path Unavailable : Exception code"+byteToHexString(data[0]));
+        	}else if(data[0]==(byte)0x0B) {
+        		throw new ModbusException("Gateway Target Device Failed to Respond : Exception code "+byteToHexString(data[0]));
+        	}else {
+        		throw new ModbusException("Exception Occured : Exception code "+byteToHexString(data[0]));
+        	}
+        }
     }
 
     public static boolean verifyCRC(byte[] response) {
@@ -82,6 +109,53 @@ class Response{
         long computedCRC = crc32.getValue();
         long receivedCRC = ((response[response.length - 2] & 0xFF) << 8) | (response[response.length - 1] & 0xFF);
         return computedCRC == receivedCRC;
+    }
+    
+    public boolean getBooleanAtIndex(int index) throws CRCVerificationException {
+        if(verifyCRC(data)) {
+            if (index < 0 || index >= extractedData.length * 8) {
+                throw new IllegalArgumentException("Index is out of range.");
+            }
+            int byteIndex = index / 8;
+            int bitIndex = index % 8;
+            byte mask = (byte) (1 << bitIndex);
+            return (extractedData[byteIndex] & mask) != 0;
+        }else {
+            throw new CRCVerificationException("CRC Verification for Read coil failed");
+        }
+     }
+    
+    public int getValueAtIndex(int index) throws CRCVerificationException{
+        if(verifyCRC(data)) {
+            // Check if the byte array length is even (each integer is represented by 2 bytes)
+            if (extractedData.length % 2 != 0) {
+                throw new IllegalArgumentException("Byte array length must be even");
+            }
+            
+            int[] result = new int[extractedData.length / 2]; // Create an array to store the integers
+            
+            for (int i = 0; i < extractedData.length; i += 2) {
+                // Combine the pair of bytes into an integer
+                result[i / 2] = (extractedData[i] << 8) | (extractedData[i + 1] & 0xFF); // Use bitwise OR to combine bytes
+            }
+            return result[index];
+        }else {
+            throw new CRCVerificationException("CRC Verification for Read coil failed");
+        }
+    }
+    public static String byteToHexString(byte b) {
+        // Convert the byte to an integer to ensure correct conversion to hexadecimal
+        int intValue = b & 0xFF; // Convert to unsigned byte
+        
+        // Convert the integer value to a hexadecimal string
+        String hexString = Integer.toHexString(intValue);
+        
+        // If the hexadecimal string has only one character, prepend a leading zero
+        if (hexString.length() == 1) {
+            hexString = "0" + hexString;
+        }
+        
+        return hexString.toUpperCase(); // Convert to uppercase for consistency
     }
 }
 
@@ -112,18 +186,13 @@ class ReadCoilStatusResponse extends Response{
         // TODO Auto-generated constructor stub
     }
 
-    public boolean getCoil(int index) throws CRCVerificationException {
-       if(verifyCRC(data)) {
-           if (index < 0 || index >= exractedData.length * 8) {
-               throw new IllegalArgumentException("Index is out of range.");
-           }
-           int byteIndex = index / 8;
-           int bitIndex = index % 8;
-           byte mask = (byte) (1 << bitIndex);
-           return (exractedData[byteIndex] & mask) != 0;
-       }else {
-           throw new CRCVerificationException("CRC Verification for Read coil failed");
-       }
+    public boolean getCoil(int index) throws CRCVerificationException, ModbusFunctionVerificationException {
+    	if (extractFunctionCode(data)==1) {
+        	return getBooleanAtIndex(index);
+    	}else {
+    		throw new ModbusFunctionVerificationException("Data is not the function code 01 : Read Coil Status");
+    	}
+
     }
 }
 
@@ -145,9 +214,7 @@ class ReadInputStatusRequest extends Request{
         buffer.putShort((short) startingAddress);
         buffer.putShort((short) quantityOfInputs);
         return addCRC(buffer.array());
-	}
-
-	
+	}	
 }
 
 class ReadInputStatusResponse extends Response{
@@ -156,9 +223,14 @@ class ReadInputStatusResponse extends Response{
         // TODO Auto-generated constructor stub
     }
 
-    public void getInput() {
-        
-    }
+    public boolean getInput(int index) throws CRCVerificationException, ModbusFunctionVerificationException {
+    	if(extractFunctionCode(data)==2) {
+        	return getBooleanAtIndex(index);
+    	}else {
+    		throw new ModbusFunctionVerificationException("Data is not the function code 02 : Read Input Status");
+    	}
+
+     }
 }
 
 class ReadHoldingRegisterRequest extends Request{
@@ -180,7 +252,24 @@ class ReadHoldingRegisterRequest extends Request{
         buffer.putShort((short) quantityOfRegisters);
         return addCRC(buffer.array());
 	}
+}
 
+class ReadHoldingRegisterResponse extends Response{
+
+	public ReadHoldingRegisterResponse(byte[] data) {
+		super(data);
+		// TODO Auto-generated constructor stub
+	}
+	
+	public int getHoldingRegister(int index) throws CRCVerificationException, ModbusFunctionVerificationException {
+		if (extractFunctionCode(data)==3) {
+			return getValueAtIndex(index);
+		}else {
+			throw new ModbusFunctionVerificationException("Data is not the function code 03 : Read Holding Register");
+		}
+
+	}
+	
 }
 
 class ReadInputRegisterRequest extends Request{
@@ -202,7 +291,22 @@ class ReadInputRegisterRequest extends Request{
         buffer.putShort((short) quantityOfRegisters);
         return addCRC(buffer.array());
 	}
-	
+}
+
+class ReadInputRegisterResponse extends Response{
+
+	public ReadInputRegisterResponse(byte[] data) {
+		super(data);
+		// TODO Auto-generated constructor stub
+	}
+	public int getInputRegister(int index) throws CRCVerificationException, ModbusFunctionVerificationException {
+		if(extractFunctionCode(data)==4) {
+			return getValueAtIndex(index);
+		}else {
+			throw new ModbusFunctionVerificationException("Data is not the function code 04 : Read Input Register");
+		}
+
+	}
 }
 
 class WriteSingleCoilRequest extends Request{
@@ -251,6 +355,19 @@ class WriteSingleRegisterRequest extends Request{
 @SuppressWarnings("serial")
 class CRCVerificationException extends Exception {
     public CRCVerificationException(String message) {
+        super(message);
+    }
+}
+@SuppressWarnings("serial")
+class ModbusFunctionVerificationException extends Exception {
+    public ModbusFunctionVerificationException(String message) {
+        super(message);
+    }
+    
+}
+@SuppressWarnings("serial")
+class ModbusException extends Exception {
+    public ModbusException(String message) {//code 01
         super(message);
     }
 }
